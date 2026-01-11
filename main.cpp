@@ -23,8 +23,6 @@
 #include <imgui.h>
 #endif
 
-
-
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "libssl.lib")
@@ -116,8 +114,9 @@ namespace MessageFactory {
 	}
 
 	// 【追加】チャットメッセージ生成（Broadcast）
-	//★ スライド6枚目　引数を追加
-	std::string MakeChatMessage(const std::string& topic, const std::string& userName, const std::string& message, std::string messageId) {
+	std::string MakeChatMessage(
+		const std::string& topic, const std::string& userName, const std::string& message,
+		const std::string& messageId) {
 		json jsonObject;
 		jsonObject["topic"] = topic;
 		jsonObject["event"] = "broadcast"; // 全員に配信するイベント
@@ -128,7 +127,6 @@ namespace MessageFactory {
 		jsonObject["payload"]["event"] = "chat_message"; // イベント名
 		jsonObject["payload"]["payload"]["user_name"] = userName;
 		jsonObject["payload"]["payload"]["message"] = message;
-		//★ スライド6枚目　メッセージIDを代入する命令を追加
 		jsonObject["payload"]["payload"]["message_id"] = messageId;
 
 		return jsonObject.dump();
@@ -231,7 +229,6 @@ struct ChatEntry {
 	std::string userName;
 	std::string message;
 	std::string timeStr;
-	//★ スライド6枚目　メッセージID追加
 	std::string messageId;
 };
 
@@ -241,20 +238,16 @@ public:
 		const std::string& userName, const std::string& message, const std::string& messageId) {
 		std::lock_guard<std::mutex> lock(mutex_);
 
-		//★ スライド7枚目　登録IDチェックのif文
 		if (seenMessageIds_.find(messageId) != seenMessageIds_.end()) {
 			return; // 重複なので何もしない
 		}
-
 		seenMessageIds_.insert(messageId);
 
 		ChatEntry entry;
 		entry.userName = userName;
 		entry.message = message;
 		entry.timeStr = Utils::GetCurrentTimeLocal();
-		//★ スライド7枚目 entry.messageId に messageIdを代入
 		entry.messageId = messageId;
-
 		messages_.push_back(entry);
 
 		// 履歴上限（例：50件）
@@ -277,8 +270,7 @@ public:
 private:
 	mutable std::mutex mutex_;
 	std::vector<ChatEntry> messages_;
-	//★ スライド7枚目　seenMessageIds_を追加
-	std::unordered_set<std::string> seenMessageIds_; // 重複排除用
+	std::unordered_set<std::string> seenMessageIds_;
 };
 
 // Realtime 接続状態クラス
@@ -286,12 +278,19 @@ class RealtimeConnectionState {
 public:
 	enum class Status { Idle, Connecting, Connected, Error, Closed };
 
+	// 5p
+	std::chrono::high_resolution_clock::time_point lastHeartbeatSentTime_;// 最後に送信した時刻
+	double lastRoundTripTimeMs_ = 0.0;// RTT ミリ秒
+
 	struct Snapshot {
 		Status status = Status::Idle;           // 接続状態
 		bool joined = false;                    // チャンネル join 状態
 		std::string lastError;                  // 最後のエラー
 		int32_t lastHeartbeatSentFrame = 0;     // 最後に送信したフレーム番号
 		int32_t lastHeartbeatReceivedFrame = 0; // 最後に受信したフレーム番号
+		//01_04
+		// 7p
+		double lastRoundTripTimeMs = 0.0;       // 最後のRTT（ミリ秒）
 	};
 
 	// 状態更新はロックで保護
@@ -318,11 +317,25 @@ public:
 	void RecordHeartbeatSent(int32_t frame) {
 		std::lock_guard<std::mutex> lock(mutex_);
 		lastHeartbeatSentFrame_ = frame;
+		//01_04
+		// 5p
+		lastHeartbeatSentTime_ = std::chrono::high_resolution_clock::now();
 	}
 
 	void RecordHeartbeatReceived(int32_t frame) {
 		std::lock_guard<std::mutex> lock(mutex_);
 		lastHeartbeatReceivedFrame_ = frame;
+		// 01_04ここから
+		// 6p
+		  // 受信時刻を取得
+		auto receiveTime = std::chrono::high_resolution_clock::now();
+		if (lastHeartbeatSentFrame_ > 0) {
+			// 経過時間をマイクロ秒に変換
+			auto duration = std::chrono::duration_cast<std::chrono::microseconds>(receiveTime - lastHeartbeatSentTime_);
+			// ミリ秒を小数で表せるように変換
+			lastRoundTripTimeMs_ = duration.count() / 1000.0;
+		}
+		// 01_04ここまで
 	}
 
 	// スナップショット取得コピー返却
@@ -334,6 +347,7 @@ public:
 		snapshot.lastError = lastError_;
 		snapshot.lastHeartbeatSentFrame = lastHeartbeatSentFrame_;
 		snapshot.lastHeartbeatReceivedFrame = lastHeartbeatReceivedFrame_;
+		snapshot.lastRoundTripTimeMs = lastRoundTripTimeMs_; // 01_04
 		return snapshot;
 	}
 
@@ -344,6 +358,8 @@ private:
 	std::string lastError_;
 	int32_t lastHeartbeatSentFrame_ = 0;
 	int32_t lastHeartbeatReceivedFrame_ = 0;
+	// 01_04
+	// 01_04
 };
 
 // JSON パースヘルパ
@@ -449,9 +465,7 @@ namespace PresenceParser {
 						data.contains("message_id")) {
 						outEntry.userName = data["user_name"].get<std::string>();
 						outEntry.message = data["message"].get<std::string>();
-						//★ スライド6枚目　messageIdをParse
-						outEntry.message = data["messageID"].get<std::string>();
-
+						outEntry.messageId = data["message_id"].get<std::string>();
 						return true;
 					}
 				}
@@ -536,6 +550,11 @@ namespace UI {
 		ImGui::Text("Last Sent Frame: %d", snapshot.lastHeartbeatSentFrame);
 		ImGui::Text("Last Recv Frame: %d", snapshot.lastHeartbeatReceivedFrame);
 		ImGui::Text("Current Frame: %d", currentFrame);
+		// 01_04ここから
+		//7p
+		ImGui::Text("RTT: %.2f ms", snapshot.lastRoundTripTimeMs);
+
+		// 01_04ここまで
 		ImGui::Unindent();
 	}
 
@@ -578,9 +597,7 @@ namespace UI {
 		ImGui::BeginChild("ChatLog", ImVec2(0, 400), true);
 		auto messages = chatManager.GetMessages();
 		for (const auto& msg : messages) {
-			//★ スライド8枚目の命令を追加
 			ImGui::TextWrapped("msgId:%s", msg.messageId.c_str());
-
 			ImGui::TextColored(
 				ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[%s] %s:", msg.timeStr.c_str(), msg.userName.c_str());
 			ImGui::SameLine();
@@ -664,7 +681,6 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 		// メッセージ受信コールバック登録
 		webSocketPtr->setOnMessageCallback([&](const ix::WebSocketMessagePtr& messagePtr) {
 			if (messagePtr->type == ix::WebSocketMessageType::Open) {
-				OutputDebugStringA("WS OPEN");
 				connectionState.SetStatus(RealtimeConnectionState::Status::Connected);
 				std::string joinMessage =
 					MessageFactory::MakeJoinMessage(Config::kTopic, Config::kUserToken);
@@ -789,8 +805,6 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 
 			if (sendTriggered) {
 				// UUID生成
-				//★ スライド6枚目　auto uuidを定義
-				//★ スライド6枚目　auto messageIdを定義
 				auto uuid = uuids::uuid_system_generator{}();
 				auto messageId = uuids::to_string(uuid);
 
