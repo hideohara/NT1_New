@@ -14,10 +14,16 @@
 
 #include "nlohmann/json.hpp"
 
+#include <unordered_set>
+#define UUID_SYSTEM_GENERATOR
+#include "uuid.h"
+
 #include <Novice.h>
 #ifdef USE_IMGUI
 #include <imgui.h>
 #endif
+
+
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "Crypt32.lib")
@@ -45,18 +51,6 @@ namespace Config {
 
 // ユーティリティ関数群
 namespace Utils {
-	// 簡易 UUID 判定ハイフン位置と全長のみ検査
-	// 厳密検査時は正規表現の利用を推奨
-	bool IsUUID(const std::string& candidate) {
-		if (candidate.length() != 36) {
-			return false;
-		}
-		if (
-			candidate[8] != '-' || candidate[13] != '-' || candidate[18] != '-' || candidate[23] != '-') {
-			return false;
-		}
-		return true;
-	}
 
 	// 現在時刻を ISO8601（UTC）形式に整形する関数
 	std::string GetCurrentTimeISO8601() {
@@ -122,8 +116,8 @@ namespace MessageFactory {
 	}
 
 	// 【追加】チャットメッセージ生成（Broadcast）
-	std::string MakeChatMessage(
-		const std::string& topic, const std::string& userName, const std::string& message) {
+	//★ スライド6枚目　引数を追加
+	std::string MakeChatMessage(const std::string& topic, const std::string& userName, const std::string& message, std::string messageId) {
 		json jsonObject;
 		jsonObject["topic"] = topic;
 		jsonObject["event"] = "broadcast"; // 全員に配信するイベント
@@ -134,6 +128,8 @@ namespace MessageFactory {
 		jsonObject["payload"]["event"] = "chat_message"; // イベント名
 		jsonObject["payload"]["payload"]["user_name"] = userName;
 		jsonObject["payload"]["payload"]["message"] = message;
+		//★ スライド6枚目　メッセージIDを代入する命令を追加
+		jsonObject["payload"]["payload"]["message_id"] = messageId;
 
 		return jsonObject.dump();
 	}
@@ -235,16 +231,30 @@ struct ChatEntry {
 	std::string userName;
 	std::string message;
 	std::string timeStr;
+	//★ スライド6枚目　メッセージID追加
+	std::string messageId;
 };
 
 class ChatManager {
 public:
-	void AddMessage(const std::string& userName, const std::string& message) {
+	void AddMessage(
+		const std::string& userName, const std::string& message, const std::string& messageId) {
 		std::lock_guard<std::mutex> lock(mutex_);
+
+		//★ スライド7枚目　登録IDチェックのif文
+		if (seenMessageIds_.find(messageId) != seenMessageIds_.end()) {
+			return; // 重複なので何もしない
+		}
+
+		seenMessageIds_.insert(messageId);
+
 		ChatEntry entry;
 		entry.userName = userName;
 		entry.message = message;
 		entry.timeStr = Utils::GetCurrentTimeLocal();
+		//★ スライド7枚目 entry.messageId に messageIdを代入
+		entry.messageId = messageId;
+
 		messages_.push_back(entry);
 
 		// 履歴上限（例：50件）
@@ -256,6 +266,7 @@ public:
 	void Clear() {
 		std::lock_guard<std::mutex> lock(mutex_);
 		messages_.clear();
+		seenMessageIds_.clear();
 	}
 
 	std::vector<ChatEntry> GetMessages() const {
@@ -266,6 +277,8 @@ public:
 private:
 	mutable std::mutex mutex_;
 	std::vector<ChatEntry> messages_;
+	//★ スライド7枚目　seenMessageIds_を追加
+	std::unordered_set<std::string> seenMessageIds_; // 重複排除用
 };
 
 // Realtime 接続状態クラス
@@ -355,7 +368,7 @@ namespace PresenceParser {
 				const std::string candidateKey = item.key();
 				const json& valueObject = item.value();
 
-				if (Utils::IsUUID(candidateKey)) {
+				if (uuids::uuid::is_valid_uuid(candidateKey)) {
 					if (valueObject.contains("metas") && !valueObject["metas"].empty()) {
 						json meta = valueObject["metas"][0];
 						if (meta.contains("user_name")) {
@@ -372,7 +385,7 @@ namespace PresenceParser {
 				const std::string candidateKey = item.key();
 				const json& valueObject = item.value();
 
-				if (Utils::IsUUID(candidateKey)) {
+				if (uuids::uuid::is_valid_uuid(candidateKey)) {
 					std::string userNameFallback = candidateKey;
 					if (valueObject.contains("metas") && !valueObject["metas"].empty()) {
 						json meta = valueObject["metas"][0];
@@ -405,7 +418,7 @@ namespace PresenceParser {
 				const std::string candidateKey = item.key();
 				const json& valueObject = item.value();
 
-				if (Utils::IsUUID(candidateKey)) {
+				if (uuids::uuid::is_valid_uuid(candidateKey)) {
 					if (valueObject.contains("metas") && !valueObject["metas"].empty()) {
 						json meta = valueObject["metas"][0];
 						if (meta.contains("user_name")) {
@@ -431,9 +444,14 @@ namespace PresenceParser {
 				json payload = parsedJson["payload"];
 				if (payload.value("event", "") == "chat_message" && payload.contains("payload")) {
 					json data = payload["payload"];
-					if (data.contains("user_name") && data.contains("message")) {
+					if (
+						data.contains("user_name") && data.contains("message") &&
+						data.contains("message_id")) {
 						outEntry.userName = data["user_name"].get<std::string>();
 						outEntry.message = data["message"].get<std::string>();
+						//★ スライド6枚目　messageIdをParse
+						outEntry.message = data["messageID"].get<std::string>();
+
 						return true;
 					}
 				}
@@ -560,6 +578,9 @@ namespace UI {
 		ImGui::BeginChild("ChatLog", ImVec2(0, 400), true);
 		auto messages = chatManager.GetMessages();
 		for (const auto& msg : messages) {
+			//★ スライド8枚目の命令を追加
+			ImGui::TextWrapped("msgId:%s", msg.messageId.c_str());
+
 			ImGui::TextColored(
 				ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[%s] %s:", msg.timeStr.c_str(), msg.userName.c_str());
 			ImGui::SameLine();
@@ -702,9 +723,9 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 					receivedText.find("broadcast") != std::string::npos &&
 					receivedText.find("chat_message") != std::string::npos) {
 					ChatEntry chatEntry;
-					bool parsed = PresenceParser::ParseChatMessage(receivedText, chatEntry);
-					if (parsed) {
-						chatManager.AddMessage(chatEntry.userName, chatEntry.message);
+					if (PresenceParser::ParseChatMessage(receivedText, chatEntry)) {
+						chatManager.AddMessage(
+							chatEntry.userName, chatEntry.message, chatEntry.messageId);
 					}
 				}
 
@@ -767,13 +788,19 @@ int32_t WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int32_t) {
 			bool sendTriggered = UI::DrawChatWindow(chatManager, chatInputBuf);
 
 			if (sendTriggered) {
+				// UUID生成
+				//★ スライド6枚目　auto uuidを定義
+				//★ スライド6枚目　auto messageIdを定義
+				auto uuid = uuids::uuid_system_generator{}();
+				auto messageId = uuids::to_string(uuid);
+
 				// 送信処理
-				std::string msgPayload =
-					MessageFactory::MakeChatMessage(Config::kTopic, displayUserName, chatInputBuf);
+				std::string msgPayload = MessageFactory::MakeChatMessage(
+					Config::kTopic, displayUserName, chatInputBuf, messageId);
 				webSocketPtr->sendText(msgPayload);
 
 				// 自分のメッセージをローカルの履歴に即座に追加（自己エコー対策）
-				chatManager.AddMessage(displayUserName, chatInputBuf);
+				chatManager.AddMessage(displayUserName, chatInputBuf, messageId);
 
 				// 入力欄クリアとフォーカス維持
 				chatInputBuf[0] = '\0';
