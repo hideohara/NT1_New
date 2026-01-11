@@ -28,7 +28,6 @@
 using json = nlohmann::json;
 const char kWindowTitle[] = "DUMMY";
 
-
 // 設定
 namespace Config {
 	// Supabase Realtime WebSocket の URLプロジェクト固有のエンドポイント
